@@ -18,9 +18,14 @@
 #include "sphere.h"
 
 #include <iostream>
+#include <thread>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "external/stb_image_write.h"
 
 
-color ray_color(const ray& r, const hittable& world, int depth) {
+color ray_color(const ray& r, const hittable& world, int depth)
+{
     hit_record rec;
 
     // If we've exceeded the ray bounce limit, no more light is gathered.
@@ -87,6 +92,44 @@ hittable_list random_scene() {
     return world;
 }
 
+struct SimpleRGB
+{
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+};
+
+
+void write_simple_color(SimpleRGB& outColor, color pixel_color, int samples_per_pixel)
+{
+    auto r = pixel_color.x();
+    auto g = pixel_color.y();
+    auto b = pixel_color.z();
+
+    // Replace NaN components with zero. See explanation in Ray Tracing: The Rest of Your Life.
+    if (r != r) r = 0.0;
+    if (g != g) g = 0.0;
+    if (b != b) b = 0.0;
+
+    // Divide the color by the number of samples and gamma-correct for gamma=2.0.
+    auto scale = 1.0 / samples_per_pixel;
+    r = sqrt(scale * r);
+    g = sqrt(scale * g);
+    b = sqrt(scale * b);
+
+    outColor.r = static_cast<int>(256 * clamp(r, 0.0, 0.999));
+    outColor.g = static_cast<int>(256 * clamp(g, 0.0, 0.999));
+    outColor.b = static_cast<int>(256 * clamp(b, 0.0, 0.999));
+}
+
+void Renderer(std::atomic_uint32_t &ScanLine, 
+    int32_t image_height, 
+    int32_t image_width, 
+    int32_t samples_per_pixel,
+    std::vector< SimpleRGB > &colors)
+{
+   
+}
 
 int main() {
 
@@ -97,6 +140,9 @@ int main() {
     const int image_height = static_cast<int>(image_width / aspect_ratio);
     const int samples_per_pixel = 10;
     const int max_depth = 50;
+
+    std::vector< SimpleRGB > colors;
+    colors.resize(image_width * image_height);
 
     // World
 
@@ -113,22 +159,47 @@ int main() {
     camera cam(lookfrom, lookat, vup, 20, aspect_ratio, aperture, dist_to_focus);
 
     // Render
-
     std::cout << "P3\n" << image_width << ' ' << image_height << "\n255\n";
 
-    for (int j = image_height-1; j >= 0; --j) {
-        std::cerr << "\rScanlines remaining: " << j << ' ' << std::flush;
-        for (int i = 0; i < image_width; ++i) {
-            color pixel_color(0,0,0);
-            for (int s = 0; s < samples_per_pixel; ++s) {
-                auto u = (i + random_double()) / (image_width-1);
-                auto v = (j + random_double()) / (image_height-1);
-                ray r = cam.get_ray(u, v);
-                pixel_color += ray_color(r, world, max_depth);
+    std::atomic_uint32_t ScanLine = 0;
+
+    auto runThread = [&]() {
+        while (true)
+        {
+            auto currentLine = ScanLine.fetch_add(1);
+            if (currentLine >= image_height)
+            {
+                return;
             }
-            write_color(std::cout, pixel_color, samples_per_pixel);
+            auto actualLine = image_height - currentLine - 1;
+            std::cerr << "\rScanlines remaining: " << actualLine << std::endl;// << ' ' << std::flush;
+            for (int i = 0; i < image_width; ++i) {
+                color pixel_color(0, 0, 0);
+                for (int s = 0; s < samples_per_pixel; ++s) {
+                    auto u = (i + random_double()) / (image_width - 1);
+                    auto v = (currentLine + random_double()) / (image_height - 1);
+                    ray r = cam.get_ray(u, v);
+                    pixel_color += ray_color(r, world, max_depth);
+                }
+                uint32_t Idx = (actualLine * image_width) + i;
+                write_simple_color(colors[Idx], pixel_color, samples_per_pixel);
+            }
         }
-    }
+    };
+
+    const auto threadCount = std::max<uint32_t>( std::thread::hardware_concurrency() - 1, 2 );
+
+    std::vector<std::thread> my_threads{};
+    my_threads.reserve(threadCount);
+
+    for (int i = 0; i < threadCount; i++)
+        my_threads.emplace_back(runThread);
+
+    for (auto& thread : my_threads)
+        if (thread.joinable())
+            thread.join();
+    
+    stbi_write_bmp("test.bmp", image_width, image_height, 3, colors.data());
 
     std::cerr << "\nDone.\n";
 }
